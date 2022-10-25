@@ -1,0 +1,312 @@
+# !/usr/bin/python
+# - * - coding: utf - 8 - *
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+import os
+import argparse
+import string
+import subprocess
+from pprint import pprint
+import datetime
+import pandas as pd
+# import schedule
+import time
+import re
+import tempfile
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import COMMASPACE
+from smtplib import SMTP
+from os.path import basename
+from email.mime.application import MIMEApplication
+from builtins import *
+from jinja2 import Template
+
+CMD_SYSTEM_FAIL = "systemctl list-units --state failed"
+HTML_FILE = "/.autodirect/mthswgwork/hhassan/git/e2e_ver/workplaceHala/hala.html"
+service_log_file = "/.autodirect/mthswgwork/hhassan/git/e2e_ver/workplaceHala/service_output.txt"
+
+
+class Mail(object):
+    ''' Mail object '''
+
+    def __init__(self, sender_email, domain="nvidia.com", smtp_address=None, port=25):
+        ''' Create a mail object.
+        @param sender_email: sender email (can be passed with only user name)
+                             does not have to be a REAL email address.
+        @type sender_email: string
+        @param domain: email domain (if sender is only a user name, the domain
+                                     will be added to user name)
+        @param smtp_address: address to use when creating connection to server
+        @param port: port to use when creating connection to server
+        '''
+        self.sender_email = sender_email
+        self.domain = domain
+        self.smtp_address = smtp_address or "10.0.8.70"
+        self.smtp_port = port
+
+    def send(self, receiver_email, subject, html_msg='', text_msg='', sender_email=None, files=None):
+        ''' send an email to receiver_email.
+        @param receiver_email: receiver email (user name or full mail address)
+        @type receiver_email: string (or a list of strings)
+        @param subject: email subject
+        @param html_msg: an html message to send (string)
+        @param text_msg: a text message to send  (string). will be used only
+                    if receiver cannot get html content or if html_msg is empty
+        @param sender_email: sender email to use (doesn't have to be a real one)
+                             if None - sender address given in init will be used.
+        '''
+        # prepare sender / receiver emails
+        sender_email = sender_email if sender_email else self.sender_email
+        sender_email = self.get_full_email_address(sender_email)
+        receiver_email = self.get_full_email_address(receiver_email, return_as_list=True)
+
+        # get message object
+        message = self.__get_message_instance(sender_email, receiver_email,
+                                              subject, html_msg, text_msg, files)
+        # send email
+        self.__send_mail(sender_email, receiver_email, message.as_string())
+
+    def __send_mail(self, sender_email, receiver_email, message):
+        ''' create connection to server and send mail '''
+        # Create connection with server and send email
+        server = SMTP(self.smtp_address, self.smtp_port, self.domain)
+        server.sendmail(sender_email, receiver_email, message)
+        server.quit()
+
+    def __get_message_instance(self, sender_email, receiver_emails, subject,
+                               html_msg='', text_msg='', files=None):
+        ''' get MIMEMultipart instance (needed for fancy emails that include
+        html content)
+        @param sender_email: sender email to use (doesn't have to be a real one)
+        @param receiver_emails: receiver emails (must be full emails)
+        @type receiver_emails: list<str>
+        @param subject: email subject
+        @param html_msg: an html message to send (string)
+        @param text_msg: a text message to send  (string). will be used only
+                    if receiver cannot get html content or if html_msg is empty
+        '''
+        # prepare message object
+        message = MIMEMultipart("alternative")
+        message["Subject"] = subject
+        message["From"] = sender_email
+        message["To"] = COMMASPACE.join(receiver_emails)
+
+        # Turn texts into plain/html MIMEText objects
+        html_part = MIMEText(html_msg, "html")
+        text_part_alternative = MIMEText(text_msg, "plain")
+
+        # Add HTML/plain-text parts to MIMEMultipart message
+        # The email client will try to render the last part first
+        message.attach(text_part_alternative)
+        message.attach(html_part) if html_msg != '' else None
+
+        for f in files or []:
+            with open(f, "rb") as fil:
+                part = MIMEApplication(
+                    fil.read(),
+                    Name=basename(f)
+                )
+            # After the file is closed
+            part['Content-Disposition'] = 'attachment; filename="%s"' % basename(f)
+            message.attach(part)
+
+        return message
+
+    def get_full_email_address(self, email, return_as_list=False):
+        ''' Return full email address.
+        if given email address contain '@', same address will be returned.
+        if it doesn't contain '@', returned address will include the domain
+        given in init stage.
+
+        @param email: a single email (str), or a list of emails.
+        @param return_as_list: True if return value should be a list.
+                               if given email pram is a list - return value
+                               will be a list (even if return_as_list is False)
+        @return: a full email string, or a list that contains full email
+                 strings (depend on given email and return_as_list params)
+        @rtype: str / list<str>
+        '''
+        # if given email is a list - operate this function on each email in list
+        if isinstance(email, (list, set,)):
+            email_list = [self.get_full_email_address(email_addr)
+                          for email_addr in email]
+            return email_list
+
+        # single email string - get full email, return as list if needed
+        full_email = email if '@' in email else "%s@%s" % (email, self.domain)
+        return [full_email] if return_as_list else full_email
+
+
+def get_option():
+    parser = argparse.ArgumentParser(description="alert email sender")
+    parser.add_argument("-s", "--sender_email", type=str, default="Labmon", help="choose the sender email")
+    parser.add_argument("-su", "--subject", type=str, default="Labmon alert failure", help="choose email subject")
+    parser.add_argument("-r", "--receiver_email", nargs='+', type=str, required=True,
+                        help="choose the receiver email \n example: --receiver_email A@nvidia.com B@nvidia.com")
+    parser.add_argument("-S", "--service_list", nargs='+', type=str, required=True,
+                        help="choose the service you want to check \n example: --service A.service B.service")
+    options = parser.parse_args()
+    return options
+
+
+class CommandToFile(object):
+    def __init__(self, cmd, html_page, services, parser_func=None, ):
+        self.temp_files = []
+        self.cmd = cmd
+        self.services = services
+        self.html_page = html_page
+        self.parser_func = self.parser_func if parser_func else self.systemctl_failed_parser
+        self.dataframe = pd.DataFrame()
+        self.start()
+
+    def get_files(self):
+        return [file.name for file in self.temp_files]
+
+    def __delete__(self):
+        for file in self.temp_files:
+
+            if os.path.exists(file.name):
+                os.remove(file.name)
+
+    def add_file(self, data, filename):
+        temp = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix="_" + filename)
+        temp.write(data)
+        temp.close()
+        self.temp_files.append(temp)
+
+    def run_command(self, cmd):
+        try:
+            return subprocess.check_output(cmd, shell=True).decode("utf-8")
+        except Exception as e:
+            return e.stdout.decode("utf-8")  # to get the output of command although it failed
+
+    def systemctl_failed_parser(self, output: str):
+        data = re.findall(r"([\w@\-\.]+)\s+(\w+)\s+(\w+)\s+(\w+)\s+([\w\s]+)$", output, re.M)
+        data.pop(0)  # remove the first row
+        df = pd.DataFrame(data=data, columns=["UNIT", "LOAD", "ACTIVE", "SUB", "DESCRIPTION"])
+        data_date = []
+        for value in df["UNIT"]:
+            service_output = self.run_command(f"systemctl status {value}")
+            newdata = re.findall(r"(\d+-\d+-\d+ \d+:\d+:\d+)", service_output, re.M)
+            data_date.append(newdata)  # put the date and the time into list
+        df['date'] = data_date  # create a new  columns, the data of rows tae from list
+
+        return df
+
+    # linux command output
+    def cmd_output(self):
+        return subprocess.check_output(self.cmd, shell=True).decode("utf-8")
+
+    def start(self):
+        output = self.cmd_output()
+        self.dataframe = self.parser_func(output)
+        tags = {
+            "table_services": self.get_table(),
+            "explain": self.system_info_legend(),
+        }
+        self.add_data_to_html(tags)
+
+    # to get the table from dataframe to html
+    def get_table(self):
+        return self.dataframe.to_html(border=3, justify="center", col_space=750)
+
+    def system_info_legend(self):
+        result = self.run_command(cmd=CMD_SYSTEM_FAIL)
+        data = "<br>".join(re.findall(r'\w+\s+=.*', result, re.M))
+        return data
+
+    def add_data_to_html(self, tags):
+        tm = Template(self.html_page)
+        html = tm.render(tags)
+        self.html_page = html
+
+
+def start_to_check():
+    args = get_option()
+    print(args)
+    mail = Mail(args.sender_email)
+    with open(HTML_FILE) as f:
+        html_data = f.read()
+    ctf = CommandToFile(cmd=CMD_SYSTEM_FAIL, services=args.service_list, html_page=html_data)
+    count_send_email = 0
+    count_service_not_found = 0
+    count_service = 0
+    ctf.start()
+
+    output = ctf.run_command('systemctl list-units  --all ')
+    data = re.findall(r"([\w@\-\.]+)\s+(\w+)\s+(\w+)\s+(\w+)\s+([\w\s]+)$", output, re.M)
+    data.pop(0)  # remove the first row
+    df = pd.DataFrame(data=data, columns=["UNIT", "LOAD", "ACTIVE", "SUB", "DESCRIPTION"])
+    print(len(df['UNIT']))
+    for s in ctf.services:
+
+        for c in ctf.dataframe['UNIT']:
+            if c == s:
+                ctf.add_file(data=ctf.run_command(cmd=f'systemctl status {s}'), filename=f"{s}.log")
+                count_send_email += 1
+            else:
+                count_service = 0
+                for d in df['UNIT']:
+
+                    if count_service <= (len(df['UNIT'])) and s != d:
+                        count_service += 1
+
+    if count_service >= (len(df['UNIT'])):
+        ctf.add_file(data='service not found', filename=f"{s}.log")
+        count_service_not_found += 1
+
+    if count_send_email >= 1 or count_service_not_found >= 1:
+        mail.send(receiver_email=args.receiver_email, subject=args.subject, html_msg=ctf.html_page,
+                  files=ctf.get_files())
+
+
+class mongo_db(object):
+    def __int__(self, last_query: str, last_time):
+        self.last_query = last_query
+        self.last_time = last_time
+
+
+class RestFUL_API(object):
+    def __int__(self, query: str):
+        self.query = query
+
+
+class Data_validation(object):
+    def __int__(self, db: mongo_db, api: RestFUL_API):
+        self.db = db
+        self.api = api
+
+    def get_last_query(self):
+        # db.last_query=write code to get the last quiry
+        if self.db.last_query == None:
+            print("oh no")
+        else:
+            print("good")
+
+    def get_the_lastime(self):
+        # db.last_time= write code to get the  last time
+        x = datetime.datetime.now()
+        if self.db.last_time != x:
+            print("not good")
+        else:
+            print("good")
+
+    def add_url_query(self):
+        # self.query =....add url to query
+        if self.api.query != None:
+            print("success")
+        else:
+            print("not success")
+
+
+def main():
+    start_to_check()
+
+
+if __name__ == '__main__':
+    main()
+    # execute_every_hour()
